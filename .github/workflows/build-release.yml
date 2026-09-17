@@ -12,10 +12,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -25,85 +25,120 @@ jobs:
         with:
           gradle-version: '8.11'
 
-      - name: Extract current Android source
+      - name: Extract Android Source
         run: |
           unzip -q SHAHI_RAJE_FINAL_CONSOLIDATED_BUILD_53.zip
           test -d SHAHI_RAJE_ANDROID_READY_SOURCE
 
-      - name: Prepare Build 54 release
+      - name: Set Build 54 Version
         working-directory: SHAHI_RAJE_ANDROID_READY_SOURCE
-        shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('app/build.gradle')
-          s = p.read_text()
-          s = s.replace("versionCode 53", "versionCode 54")
-          s = s.replace("versionName '53.0'", "versionName '54.0'")
-          if 'release {' not in s:
-              raise SystemExit('release buildType missing')
-          s = s.replace('release {\n', 'release {\n            minifyEnabled false\n            shrinkResources false\n            debuggable false\n', 1)
-          p.write_text(s)
-          readme = Path('app/src/main/assets/README.md')
-          if readme.exists():
-              readme.write_text(readme.read_text().replace('This package is an installable PWA build, not an Android APK.', 'This package contains the Android application source for SHAHI RAJE BUSINESS MANAGEMENT SYSTEM.'))
+          import re
+
+          p = Path("app/build.gradle")
+          text = p.read_text()
+
+          text = re.sub(
+              r'versionCode\s+\d+',
+              'versionCode 54',
+              text,
+              count=1
+          )
+
+          text = re.sub(
+              r'versionName\s+["\'][^"\']*["\']',
+              'versionName "54.0"',
+              text,
+              count=1
+          )
+
+          p.write_text(text)
+          print("Build 54 version configured")
           PY
-          grep -nE 'versionCode|versionName|minifyEnabled|debuggable' app/build.gradle
 
-      - name: Build release APK
-        working-directory: SHAHI_RAJE_ANDROID_READY_SOURCE
-        run: gradle assembleRelease --stacktrace
+          grep -n "versionCode\|versionName" app/build.gradle
 
-      - name: Generate ephemeral CI signing key
+      - name: Build Release APK
         working-directory: SHAHI_RAJE_ANDROID_READY_SOURCE
-        shell: bash
         run: |
-          set -euo pipefail
-          PASS="$(openssl rand -hex 24)"
-          echo "KEYSTORE_PASS=$PASS" >> "$GITHUB_ENV"
-          keytool -genkeypair -v \
-            -keystore ci-release.jks \
-            -storepass "$PASS" \
-            -keypass "$PASS" \
+          gradle clean assembleRelease --stacktrace
+          test -f app/build/outputs/apk/release/app-release-unsigned.apk
+
+      - name: Locate Android Build Tools
+        id: tools
+        run: |
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -1)
+          test -d "$BUILD_TOOLS"
+
+          echo "BUILD_TOOLS=$BUILD_TOOLS" >> "$GITHUB_ENV"
+          echo "Using build tools: $BUILD_TOOLS"
+
+          test -x "$BUILD_TOOLS/zipalign"
+          test -x "$BUILD_TOOLS/apksigner"
+
+      - name: Generate CI Signing Key
+        run: |
+          mkdir -p signing
+
+          keytool -genkeypair \
+            -v \
+            -keystore signing/shahi-raje-ci.jks \
+            -storepass changeit \
+            -keypass changeit \
             -alias shahi-raje-ci \
             -keyalg RSA \
             -keysize 2048 \
-            -validity 3650 \
-            -dname "CN=SHAHI RAJE CI, OU=Build, O=SHAHI RAJE, L=India, ST=Maharashtra, C=IN"
+            -validity 10000 \
+            -dname "CN=SHAHI RAJE, OU=CI, O=SHAHI RAJE, L=India, ST=Maharashtra, C=IN"
 
-      - name: Align and sign APK
+          test -f signing/shahi-raje-ci.jks
+
+      - name: Align Release APK
         working-directory: SHAHI_RAJE_ANDROID_READY_SOURCE
-        shell: bash
         run: |
-          set -euo pipefail
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
-          ZIPALIGN="$(find "$ANDROID_HOME/build-tools" -type f -name zipalign | sort -V | tail -1)"
-          test -n "$APKSIGNER"
-          test -n "$ZIPALIGN"
-          zipalign -f 4 app/build/outputs/apk/release/app-release.apk app-release-aligned.apk
-          "$APKSIGNER" sign \
-            --ks ci-release.jks \
-            --ks-pass env:KEYSTORE_PASS \
-            --key-pass env:KEYSTORE_PASS \
-            --out SHAHI-RAJE-BUILD-54-release.apk \
-            app-release-aligned.apk
+          mkdir -p app/build/outputs/apk/release
 
-      - name: Verify signed APK
+          "$BUILD_TOOLS/zipalign" \
+            -f -p 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            app/build/outputs/apk/release/app-release-aligned.apk
+
+          test -f app/build/outputs/apk/release/app-release-aligned.apk
+
+      - name: Sign Release APK
         working-directory: SHAHI_RAJE_ANDROID_READY_SOURCE
-        shell: bash
         run: |
-          set -euo pipefail
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -1)"
-          test -f SHAHI-RAJE-BUILD-54-release.apk
-          "$APKSIGNER" verify --verbose --print-certs SHAHI-RAJE-BUILD-54-release.apk
-          echo "===== SHA-256 ====="
-          sha256sum SHAHI-RAJE-BUILD-54-release.apk
-          echo "===== APK DETAILS ====="
-          "$ANDROID_HOME/platform-tools/aapt2" dump badging SHAHI-RAJE-BUILD-54-release.apk | head -5 || true
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks ../signing/shahi-raje-ci.jks \
+            --ks-pass pass:changeit \
+            --key-pass pass:changeit \
+            --ks-key-alias shahi-raje-ci \
+            --out app/build/outputs/apk/release/SHAHI-RAJE-BUILD-54-RELEASE.apk \
+            app/build/outputs/apk/release/app-release-aligned.apk
 
-      - name: Upload verified release APK
+          test -f app/build/outputs/apk/release/SHAHI-RAJE-BUILD-54-RELEASE.apk
+
+      - name: Verify Signed APK
+        working-directory: SHAHI_RAJE_ANDROID_READY_SOURCE
+        run: |
+          APK="app/build/outputs/apk/release/SHAHI-RAJE-BUILD-54-RELEASE.apk"
+
+          echo "===== APK SHA-256 ====="
+          sha256sum "$APK"
+
+          echo "===== APK SIGNATURE VERIFICATION ====="
+          "$BUILD_TOOLS/apksigner" verify \
+            --verbose \
+            --print-certs \
+            "$APK"
+
+          echo "===== APK VERIFICATION PASSED ====="
+
+      - name: Upload Verified Release APK
         uses: actions/upload-artifact@v4
         with:
           name: SHAHI-RAJE-BUILD-54-RELEASE-VERIFIED
-          path: SHAHI_RAJE_ANDROID_READY_SOURCE/SHAHI-RAJE-BUILD-54-release.apk
+          path: SHAHI_RAJE_ANDROID_READY_SOURCE/app/build/outputs/apk/release/SHAHI-RAJE-BUILD-54-RELEASE.apk
           if-no-files-found: error
