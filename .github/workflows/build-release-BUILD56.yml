@@ -27,7 +27,7 @@ jobs:
 
       - name: Extract Android Source
         run: |
-          unzip -q SHAHI_RAJE_FINAL_CONSOLIDATED_BUILD_53.zip
+          unzip -q SHAHI_RAJE_FINAL_CONSOLIDATED_BUILD_53_BUILD56.zip
           test -d SHAHI_RAJE_ANDROID_READY_SOURCE
 
       - name: Verify Build 56 Source
